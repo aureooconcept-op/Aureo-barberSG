@@ -28,6 +28,7 @@ nav{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;b
 nav button{flex:1;max-width:120px;border:0;border-radius:0;background:none;color:var(--g);font-size:10px;letter-spacing:.06em;padding:10px 2px 8px;margin:0;display:flex;flex-direction:column;align-items:center;gap:4px}
 nav svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}nav .on{color:var(--m);box-shadow:inset 0 2px 0 var(--j)}
 #toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);background:var(--j);color:#0d1f19;padding:11px 18px;border-radius:12px;display:none;z-index:9;font-weight:600;box-shadow:0 8px 30px rgba(0,0,0,.5);max-width:92%}
+.nav2{display:flex;gap:8px;align-items:center}.nav2 button{width:44px;margin:0}.bar{height:8px;background:#171819;border-radius:9px;margin-top:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--j)}.gold{color:var(--o);font-size:18px}
 </style></head><body>
 <div id="toast"></div><header hidden><div class="w"><i class="a">A</i>UREO</div><span class="pill" id="who"></span></header><div id="v"></div><nav id="nav"></nav>
 <script>
@@ -55,7 +56,7 @@ let H={n:0,t:0};
 const hero=()=>{const e=$('#hero');if(e)e.innerHTML=`<span class="pill">Hoy</span><div class="big">${$m(H.t)}</div><small>${H.n} cortes registrados</small>`};
 function reg(){const cs=C.services.filter(s=>s.kind=='corte'&&s.active),pr=C.products.filter(p=>p.active);st={s:cs[0]?.id,b:0,m:0};
  V(`<div class="hero" id="hero"></div>
- <div class="card"><h3>Barbero</h3><select id="cb">${opts(C.barbers,U.id)}</select></div>
+ <div class="card"><h3>${U.role=='admin'?'Barbero':'Registrando como'}</h3>${U.role=='admin'?`<select id="cb">${opts(C.barbers,U.id)}</select>`:`<input type="hidden" id="cb" value="${U.id}"><div class="row" style="justify-content:space-between"><b>${esc(U.name)}</b><small>Fijo: solo tu perfil</small></div>`}</div>
  <div class="card"><h3>Servicio</h3><div class="tiles">${cs.map(s=>`<button class="tile" data-s="${s.id}" onclick="st.s=${s.id};upd()"><b>${esc(s.name)}</b><small>${$m(s.price)}</small></button>`).join('')}</div>
  <div class="tiles"><button class="tile" id="bb" onclick="st.b^=1;upd()"><b>+ Barba</b><small>${$m(ex('Barba'))}</small></button><button class="tile" id="mm" onclick="st.m^=1;upd()"><b>+ Mascarilla</b><small>${$m(ex('Mascarilla'))}</small></button></div>
  <h3 style="margin-top:14px">Cliente (opcional)</h3><div class="row"><input id="cn" placeholder="Nombre"><input id="cp" placeholder="Teléfono" inputmode="tel"></div>
@@ -74,12 +75,28 @@ function saveSale(){const o=$('#sp').selectedOptions[0];if(!o)return;const q=Mat
  api('sales','POST',{barber_id:$('#cb').value,product_id:o.value,qty:q}).catch(e=>{H.t-=t;hero();toast('NO SE GUARDÓ: '+e.message,6000)})}
 
 // ---------- Reportes / Mis números ----------
-async function resumen(){const t=today();V(`<div class="card row"><input type="date" id="f" value="${t.slice(0,8)}01"><input type="date" id="t" value="${t}"></div><div id="r"><div class="sk"></div><div class="sk"></div></div>`);
- $('#f').onchange=$('#t').onchange=()=>T(load);await load()}
+async function resumen(){const t=today();WK=mon(t);V(`<div id="w"><div class="sk"></div></div><h3 style="margin:18px 2px 10px">Resumen por periodo</h3><div class="card row"><input type="date" id="f" value="${t.slice(0,8)}01"><input type="date" id="t" value="${t}"></div><div id="r"><div class="sk"></div><div class="sk"></div></div>`);
+ $('#f').onchange=$('#t').onchange=()=>T(load);T(week);await load()}
 async function load(){const s=await api(`stats?from=${$('#f').value}&to=${$('#t').value}`),S=k=>s.per.reduce((a,x)=>a+x[k],0),tc=S('cut_rev'),ts=S('sales_rev');
  $('#r').innerHTML=`<div class="card"><div class="k">${[['Cortes',S('cuts')],['Clientes registrados',s.clients],['Ingresos por cortes',$m(tc)],['Ventas de productos',$m(ts)],['Total',$m(tc+ts)]].map(x=>`<div><span>${x[0]}</span><b>${x[1]}</b></div>`).join('')}</div></div>
  <div class="card"><h3>Por barbero</h3><table><tr><th>Barbero<th>Cortes<th>Cortes $<th>Ventas $${s.per.map(x=>`<tr><td>${esc(x.name)}<td>${x.cuts}<td>${$m(x.cut_rev)}<td>${$m(x.sales_rev)}`).join('')}</table></div>
  <div class="card"><h3>Proyección mensual · base ${s.proj.meses} mes(es) cerrado(s)</h3><div class="k">${s.proj.p.map(p=>`<div><span>En ${p.k} ${p.k>1?'meses':'mes'}</span><b>${$m(p.rev)}</b><span>${p.cuts} cortes/mes</span></div>`).join('')}</div>${s.proj.meses<3?'<small>Con poco historial la proyección es solo orientativa.</small>':''}</div>`}
+
+// ---------- Semana: renta y comisión ----------
+let WK,PCT=10;
+const addD=(d,n)=>{const x=new Date(d+'T00:00:00Z');x.setUTCDate(x.getUTCDate()+n);return x.toISOString().slice(0,10)},
+ mon=d=>addD(d,-((new Date(d+'T00:00:00Z').getUTCDay()+6)%7)),
+ dm=d=>new Date(d+'T00:00:00Z').toLocaleDateString('es-CO',{day:'numeric',month:'short',timeZone:'UTC'});
+async function week(){const w=await api('week?start='+WK),a=U.role=='admin',x=w.rows[0]||{cuts:0,cut_rev:0,units:0,commission:0};
+ let body;
+ if(a){const g=r=>r.cut_rev+r.commission,tot=w.rows.reduce((s,r)=>s+Math.min(g(r),w.rent),0);
+  body=`<div class="card"><h3>Pago semanal por barbero</h3><table><tr><th>Barbero<th>Cortes $<th>Comisión<th>Neto${w.rows.map(r=>`<tr><td>${esc(r.name)}<td>${$m(r.cut_rev)}<td>${$m(r.commission)}<td><b>${$m(Math.max(0,g(r)-w.rent))}</b>`).join('')}</table><small>Renta de silla: ${$m(w.rent)} por barbero · Renta cubierta esta semana: ${$m(tot)}</small></div>`}
+ else{const g=x.cut_rev+x.commission,net=Math.max(0,g-w.rent),pc=Math.min(100,Math.round(g/w.rent*100));
+  body=`<div class="hero"><span class="pill">A recibir esta semana</span><div class="big">${$m(net)}</div><small>${g>=w.rent?'Ya con la renta de la silla descontada':'Te faltan '+$m(w.rent-g)+' para cubrir la renta'}</small></div>
+  <div class="card"><h3>Cómo se calcula</h3><table><tr><td>Cortes (${x.cuts})<td>${$m(x.cut_rev)}<tr><td>Comisión de productos (${w.pct}%)<td>+ ${$m(x.commission)}<tr><td>Renta de silla<td>− ${$m(w.rent)}<tr><td><b>A recibir</b><td><b class="gold">${$m(net)}</b></table>
+  <small>Renta cubierta · ${$m(Math.min(g,w.rent))} de ${$m(w.rent)}</small><div class="bar"><i style="width:${pc}%"></i></div></div>
+  <div class="card"><h3>Productos vendidos · ${x.units}</h3><table>${w.items.map(i=>`<tr><td>${esc(i.name)} ×${i.qty}<td>ganancia ${$m(i.profit)}<td><b>${$m(i.profit*w.pct/100)}</b>`).join('')||'<tr><td><small>Sin ventas esta semana</small>'}</table><small>Recibes el ${w.pct}% de la ganancia, no del precio de venta</small></div>`}
+ $('#w').innerHTML=`<div class="card nav2"><button onclick="WK=addD(WK,-7);T(week)" aria-label="Semana anterior">‹</button><div style="text-align:center;flex:1"><b>Semana ${dm(WK)} – ${dm(addD(WK,6))}</b><br><small>Lunes a domingo${WK==mon(today())?' · en curso':''}</small></div><button onclick="WK=addD(WK,7);T(week)" aria-label="Semana siguiente">›</button></div>`+body}
 
 // ---------- Agenda ----------
 async function agenda(){const[ap,av]=await Promise.all([api('appointments?from='+today()),api('availability')]),a=U.role=='admin';AV=av;
@@ -103,12 +120,17 @@ async function clientes(){const cs=await api('clients'),now=Date.now();
  <div class="card"><h3>Todos los clientes (${cs.length})</h3><table>${H}${cs.map(cl).join('')}</table></div>`)}
 
 // ---------- Ajustes ----------
+const prow=x=>`<div class="r" data-id="${x.id||''}" style="margin-bottom:12px"><div class="row"><input class="n" value="${esc(x.name)}" placeholder="Producto"><input class="p" type="number" value="${x.price??''}" placeholder="Venta" oninput="pf(this)"><input class="c" type="number" value="${x.cost??''}" placeholder="Costo" oninput="pf(this)"></div><div class="row"><label><input class="a" type="checkbox" ${x.active==0?'':'checked'}> activo</label><small class="pf"></small></div></div>`;
+function pf(e){const r=e.closest('.r'),v=(+r.querySelector('.p').value)-(+r.querySelector('.c').value);r.querySelector('.pf').textContent=`Ganancia ${$m(v)} · barbero ${$m(v*PCT/100)}`}
+const pcard=()=>`<div class="card"><h3>Productos y márgenes (venta · costo)</h3><div id="products">${C.products.map(prow).join('')}</div><div class="row"><button onclick="add('products')">+ Agregar</button><button class="go" onclick="T(()=>saveCat('products'))">Guardar</button></div><small>Ganancia = venta − costo. Solo el administrador ve y edita el costo.</small></div>`;
+const cfgCard=S=>`<div class="card"><h3>Reglas semanales</h3><div class="row"><label>Renta de silla por semana<input id="rent" type="number" value="${S.rent_weekly}"></label><label>% del barbero en productos<input id="pct" type="number" min="0" max="100" value="${S.commission_pct}"></label></div><button class="go" onclick="T(saveCfg)">Guardar reglas</button><small>La semana va de lunes a domingo.</small></div>`;
+async function saveCfg(){await api('settings','PUT',{rent_weekly:$('#rent').value,commission_pct:$('#pct').value});PCT=+$('#pct').value;toast('Reglas guardadas')}
 const rw=x=>`<div class="row r" data-id="${x.id||''}"><input class="n" value="${esc(x.name)}" ${x.kind=='extra'?'readonly':''} placeholder="Nombre"><input class="p" type="number" value="${x.price??''}" placeholder="Precio"><label><input class="a" type="checkbox" ${x.active==0?'':'checked'}> activo</label></div>`;
-function add(t){$('#'+t).insertAdjacentHTML('beforeend',rw({}))}
-async function saveCat(t){await api('catalog/'+t,'PUT',{items:[...document.querySelectorAll('#'+t+' .r')].map(e=>({id:+e.dataset.id||null,name:e.querySelector('.n').value.trim(),price:+e.querySelector('.p').value,active:+e.querySelector('.a').checked}))});C=await api('catalog');toast('Precios guardados')}
+function add(t){$('#'+t).insertAdjacentHTML('beforeend',(t=='products'?prow:rw)({}))}
+async function saveCat(t){await api('catalog/'+t,'PUT',{items:[...document.querySelectorAll('#'+t+' .r')].map(e=>({id:+e.dataset.id||null,name:e.querySelector('.n').value.trim(),price:+e.querySelector('.p').value,cost:+(e.querySelector('.c')?.value||0),active:+e.querySelector('.a').checked}))});C=await api('catalog');toast('Precios guardados')}
 async function saveUser(){await api('users','POST',{name:$('#un').value,username:$('#uu').value,password:$('#up').value,role:$('#ur').value,active:$('#ua').checked});toast('Usuario guardado');C=await api('catalog')}
-function ajustes(){const ed=(t,n,l)=>`<div class="card"><h3>${n}</h3><div id="${t}">${l.map(rw).join('')}</div><div class="row"><button onclick="add('${t}')">+ Agregar</button><button class="go" onclick="T(()=>saveCat('${t}'))">Guardar</button></div></div>`;
- V(ed('services','Servicios y precios (Barba y Mascarilla se suman al corte)',C.services)+ed('products','Productos',C.products)+
+async function ajustes(){const S=await api('settings');const ed=(t,n,l)=>`<div class="card"><h3>${n}</h3><div id="${t}">${l.map(rw).join('')}</div><div class="row"><button onclick="add('${t}')">+ Agregar</button><button class="go" onclick="T(()=>saveCat('${t}'))">Guardar</button></div></div>`;
+ V(ed('services','Servicios y precios (Barba y Mascarilla se suman al corte)',C.services)+cfgCard(S)+pcard()+
  `<div class="card"><h3>Usuarios (mismo usuario = actualizar / restablecer clave)</h3><div class="row"><input id="un" placeholder="Nombre"><input id="uu" placeholder="Usuario" autocapitalize="off"></div><div class="row"><input id="up" type="password" placeholder="Clave nueva"><select id="ur"><option value="barbero">Barbero</option><option value="admin">Admin</option></select><label><input id="ua" type="checkbox" checked> activo</label></div><button class="go" onclick="T(saveUser)">Guardar usuario</button><small>Clave inicial de todos: cambiar123 — cámbiala.</small></div>
- <div class="card"><h3>Exportar</h3>${['cuts','sales','clients','resumen'].map(n=>`<a href="/api/export/${n}.csv">${n}.csv</a>`).join(' · ')}</div>`)}
+ <div class="card"><h3>Exportar</h3>${['cuts','sales','clients','resumen'].map(n=>`<a href="/api/export/${n}.csv">${n}.csv</a>`).join(' · ')}</div>`);PCT=S.commission_pct;document.querySelectorAll('#products .r input.p').forEach(pf)}
 </script></body></html>
