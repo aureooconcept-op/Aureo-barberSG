@@ -1,0 +1,92 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Barbería</title>
+<style>
+:root{--bg:#0f1012;--c:#191b1f;--l:#2a2d33;--t:#eceae6;--m:#8b8f98;--a:#c9a15b}
+*{box-sizing:border-box}body{margin:auto;background:var(--bg);color:var(--t);font:16px system-ui,sans-serif;padding:12px 12px 84px;max-width:760px}
+.card{background:var(--c);border:1px solid var(--l);border-radius:12px;padding:14px;margin:0 0 12px}
+h3{margin:0 0 10px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--m)}
+input,select,button{font:inherit;color:var(--t);background:var(--bg);border:1px solid var(--l);border-radius:10px;padding:12px;width:100%;margin:0 0 8px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.row>*{flex:1}input[type=checkbox]{width:auto;flex:0}
+button{cursor:pointer}.on{border-color:var(--a)!important;background:#2a2418!important;color:var(--a)!important}
+.go{background:var(--a);color:#111;font-weight:700;border:0}
+.big{font-size:30px;font-weight:700;color:var(--a);text-align:center;margin:4px 0 10px}
+.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}.k div{background:var(--bg);border-radius:10px;padding:10px}.k b{display:block;font-size:20px}.k span{color:var(--m);font-size:12px;display:block}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:7px 4px;border-bottom:1px solid var(--l);text-align:right}td:first-child,th:first-child{text-align:left}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--c);border-top:1px solid var(--l)}nav button{border:0;border-radius:0;margin:0;padding:16px 2px;background:none;font-size:13px}
+a{color:var(--a)}small{color:var(--m)}.hot td{color:var(--a)}
+#toast{position:fixed;top:12px;left:50%;transform:translateX(-50%);background:var(--a);color:#111;padding:10px 16px;border-radius:10px;display:none;z-index:9;font-weight:600}
+</style></head><body>
+<div id="toast"></div><div id="v"></div><nav id="nav"></nav>
+<script>
+const $=s=>document.querySelector(s),$m=n=>'$'+Math.round(n).toLocaleString('es-CO'),
+ esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt()+';'),
+ today=()=>new Date(Date.now()-5*36e5).toISOString().slice(0,10),
+ D=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'],V=h=>$('#v').innerHTML=h,
+ opts=(l,s)=>l.map(x=>`<option value="${x.id}" ${x.id==s?'selected':''}>${esc(x.name)}</option>`).join(''),
+ ex=n=>C.services.find(s=>s.name==n&&s.kind=='extra')?.price||0;
+let U,C,AV,TABS,st={};
+async function api(p,m='GET',b){const r=await fetch('/api/'+p,{method:m,headers:{'Content-Type':'application/json'},body:b&&JSON.stringify(b)}),j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'Error');return j}
+function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';setTimeout(()=>e.style.display='none',2200)}
+async function T(f){try{await f()}catch(e){toast(e.message)}}
+api('me').then(start,login);
+
+function login(){$('#nav').innerHTML='';V(`<div class="card" style="margin-top:18vh"><h3>Barbería · Ingresar</h3><input id="u" placeholder="Usuario" autocapitalize="off"><input id="p" type="password" placeholder="Clave"><button class="go" onclick="T(async()=>start(await api('login','POST',{username:$('#u').value,password:$('#p').value})))">Entrar</button></div>`)}
+async function start(u){U=u;C=await api('catalog');const a=U.role=='admin';
+ TABS=[['Registrar',reg],[a?'Reportes':'Mis números',resumen],['Agenda',agenda],...(a?[['Clientes',clientes],['Ajustes',ajustes]]:[])];
+ $('#nav').innerHTML=TABS.map((x,i)=>`<button onclick="go(${i})">${x[0]}</button>`).join('')+`<button onclick="api('logout','POST').then(login)">Salir</button>`;go(0)}
+function go(i){document.querySelectorAll('nav button').forEach((b,j)=>b.classList.toggle('on',i==j));T(TABS[i][1])}
+
+// ---------- Registrar ----------
+function reg(){const cs=C.services.filter(s=>s.kind=='corte'&&s.active),pr=C.products.filter(p=>p.active);st={s:cs[0]?.id,b:0,m:0};
+ V(`<div class="card"><h3>Barbero</h3><select id="cb">${opts(C.barbers,U.id)}</select></div>
+ <div class="card"><h3>Corte</h3><div class="row">${cs.map(s=>`<button data-s="${s.id}" onclick="st.s=${s.id};upd()">${esc(s.name)}<br><small>${$m(s.price)}</small></button>`).join('')}</div>
+ <div class="row"><button id="bb" onclick="st.b^=1;upd()">Barba</button><button id="mm" onclick="st.m^=1;upd()">Mascarilla</button></div>
+ <div class="row"><input id="cn" placeholder="Nombre (opcional)"><input id="cp" placeholder="Teléfono (opcional)" inputmode="tel"></div>
+ <div class="big" id="tot"></div><button class="go" onclick="T(saveCut)">Guardar corte</button></div>
+ <div class="card"><h3>Venta de producto</h3><select id="sp" onchange="upd2()">${pr.map(p=>`<option value="${p.id}" data-p="${p.price}">${esc(p.name)} · ${$m(p.price)}</option>`).join('')}</select>
+ <div class="row"><input id="sq" type="number" value="1" min="1" oninput="upd2()"><div class="big" id="st2"></div></div><button class="go" onclick="T(saveSale)">Guardar venta</button></div>`);upd();upd2()}
+function upd(){document.querySelectorAll('[data-s]').forEach(e=>e.classList.toggle('on',e.dataset.s==st.s));$('#bb').classList.toggle('on',!!st.b);$('#mm').classList.toggle('on',!!st.m);
+ $('#tot').textContent=$m((C.services.find(s=>s.id==st.s)?.price||0)+st.b*ex('Barba')+st.m*ex('Mascarilla'))}
+function upd2(){const o=$('#sp').selectedOptions[0];$('#st2').textContent=o?$m(o.dataset.p*$('#sq').value):''}
+async function saveCut(){const r=await api('cuts','POST',{barber_id:$('#cb').value,service_id:st.s,beard:st.b,mask:st.m,name:$('#cn').value,phone:$('#cp').value});
+ toast('Corte guardado · '+$m(r.price));st.b=st.m=0;$('#cn').value=$('#cp').value='';upd()}
+async function saveSale(){const r=await api('sales','POST',{barber_id:$('#cb').value,product_id:$('#sp').value,qty:$('#sq').value});toast('Venta guardada · '+$m(r.total));$('#sq').value=1;upd2()}
+
+// ---------- Reportes / Mis números ----------
+async function resumen(){const t=today();V(`<div class="card row"><input type="date" id="f" value="${t.slice(0,8)}01"><input type="date" id="t" value="${t}"></div><div id="r"></div>`);
+ $('#f').onchange=$('#t').onchange=()=>T(load);await load()}
+async function load(){const s=await api(`stats?from=${$('#f').value}&to=${$('#t').value}`),S=k=>s.per.reduce((a,x)=>a+x[k],0),tc=S('cut_rev'),ts=S('sales_rev');
+ $('#r').innerHTML=`<div class="card"><div class="k">${[['Cortes',S('cuts')],['Clientes registrados',s.clients],['Ingresos por cortes',$m(tc)],['Ventas de productos',$m(ts)],['Total',$m(tc+ts)]].map(x=>`<div><span>${x[0]}</span><b>${x[1]}</b></div>`).join('')}</div></div>
+ <div class="card"><h3>Por barbero</h3><table><tr><th>Barbero<th>Cortes<th>Cortes $<th>Ventas $${s.per.map(x=>`<tr><td>${esc(x.name)}<td>${x.cuts}<td>${$m(x.cut_rev)}<td>${$m(x.sales_rev)}`).join('')}</table></div>
+ <div class="card"><h3>Proyección mensual · base ${s.proj.meses} mes(es) cerrado(s)</h3><div class="k">${s.proj.p.map(p=>`<div><span>En ${p.k} ${p.k>1?'meses':'mes'}</span><b>${$m(p.rev)}</b><span>${p.cuts} cortes/mes</span></div>`).join('')}</div>${s.proj.meses<3?'<small>Con poco historial la proyección es solo orientativa.</small>':''}</div>`}
+
+// ---------- Agenda ----------
+async function agenda(){const[ap,av]=await Promise.all([api('appointments?from='+today()),api('availability')]),a=U.role=='admin';AV=av;
+ V(`<div class="card"><h3>Nueva cita</h3>${a?`<select id="ab">${opts(C.barbers)}</select>`:''}<div class="row"><input id="an" placeholder="Cliente"><input id="ap" placeholder="Teléfono" inputmode="tel"></div><input id="at" type="datetime-local"><button class="go" onclick="T(addAp)">Agendar</button></div>
+ <div class="card"><h3>Próximas citas</h3>${ap.map(x=>`<p><b>${x.starts_at.replace('T',' ')}</b> · ${esc(x.barber)} · ${esc(x.client||'—')} <a href="#" onclick="T(()=>cancel(${x.id}));return false">cancelar</a></p>`).join('')||'<small>Sin citas</small>'}</div>
+ <div class="card"><h3>Disponibilidad${a?'':' (mi horario)'}</h3>${a?`<select id="vb" onchange="edAv()">${opts(C.barbers)}</select><div id="ev"></div><button class="go" onclick="T(saveAv)">Guardar disponibilidad</button>`
+ :D.map((d,i)=>{const r=av.find(x=>x.weekday==i);return`<p>${d}: ${r?r.start+' – '+r.end:'libre / no trabaja'}</p>`}).join('')}</div>`);if(a)edAv()}
+function edAv(){const b=$('#vb').value;$('#ev').innerHTML=D.map((d,i)=>{const r=AV.find(x=>x.barber_id==b&&x.weekday==i)||{};return`<div class="row"><span>${d}</span><input type="time" value="${r.start||''}"><input type="time" value="${r.end||''}"></div>`}).join('')}
+async function saveAv(){const b=+$('#vb').value,rows=[...document.querySelectorAll('#ev .row')].map((e,i)=>({weekday:i,start:e.children[1].value,end:e.children[2].value})).filter(r=>r.start&&r.end);
+ await api('availability','PUT',{barber_id:b,rows});AV=AV.filter(x=>x.barber_id!=b).concat(rows.map(r=>({...r,barber_id:b})));toast('Guardado')}
+async function addAp(){await api('appointments','POST',{barber_id:$('#ab')?.value,name:$('#an').value,phone:$('#ap').value,starts_at:$('#at').value});toast('Cita creada');agenda()}
+async function cancel(id){await api('appointments/'+id,'DELETE');agenda()}
+
+// ---------- Clientes ----------
+const wa=c=>`https://wa.me/${c.phone}?text=${encodeURIComponent(`Hola ${c.name||''}, ya va siendo hora de tu próximo corte 💈 ¿Te agendamos?`)}`;
+const cl=c=>`<tr class="${c.d<=7?'hot':''}"><td>${esc(c.name||c.phone)}<td>${c.visits}<td>${c.d==999?'—':c.d<0?'vencido '+-c.d+'d':'en '+c.d+'d'}<td><a href="${wa(c)}" target="_blank">WhatsApp</a>`;
+async function clientes(){const cs=await api('clients'),now=Date.now();
+ cs.forEach(c=>c.d=c.last?Math.round((new Date(c.last.replace(' ','T')).getTime()+c.cycle_days*864e5-now)/864e5):999);cs.sort((a,b)=>a.d-b.d);
+ const H='<tr><th>Cliente<th>Cortes<th>Próximo corte<th>';
+ V(`<div class="card"><h3>Próximos a volver (≤ 7 días o vencidos)</h3><table>${H}${cs.filter(c=>c.d<=7).map(cl).join('')||'<tr><td colspan=4><small>Nadie por ahora</small>'}</table></div>
+ <div class="card"><h3>Todos los clientes (${cs.length})</h3><table>${H}${cs.map(cl).join('')}</table></div>`)}
+
+// ---------- Ajustes ----------
+const rw=x=>`<div class="row r" data-id="${x.id||''}"><input class="n" value="${esc(x.name)}" ${x.kind=='extra'?'readonly':''} placeholder="Nombre"><input class="p" type="number" value="${x.price??''}" placeholder="Precio"><label><input class="a" type="checkbox" ${x.active==0?'':'checked'}> activo</label></div>`;
+function add(t){$('#'+t).insertAdjacentHTML('beforeend',rw({}))}
+async function saveCat(t){await api('catalog/'+t,'PUT',{items:[...document.querySelectorAll('#'+t+' .r')].map(e=>({id:+e.dataset.id||null,name:e.querySelector('.n').value.trim(),price:+e.querySelector('.p').value,active:+e.querySelector('.a').checked}))});C=await api('catalog');toast('Precios guardados')}
+async function saveUser(){await api('users','POST',{name:$('#un').value,username:$('#uu').value,password:$('#up').value,role:$('#ur').value,active:$('#ua').checked});toast('Usuario guardado');C=await api('catalog')}
+function ajustes(){const ed=(t,n,l)=>`<div class="card"><h3>${n}</h3><div id="${t}">${l.map(rw).join('')}</div><div class="row"><button onclick="add('${t}')">+ Agregar</button><button class="go" onclick="T(()=>saveCat('${t}'))">Guardar</button></div></div>`;
+ V(ed('services','Servicios y precios (Barba y Mascarilla se suman al corte)',C.services)+ed('products','Productos',C.products)+
+ `<div class="card"><h3>Usuarios (mismo usuario = actualizar / restablecer clave)</h3><div class="row"><input id="un" placeholder="Nombre"><input id="uu" placeholder="Usuario" autocapitalize="off"></div><div class="row"><input id="up" type="password" placeholder="Clave nueva"><select id="ur"><option value="barbero">Barbero</option><option value="admin">Admin</option></select><label><input id="ua" type="checkbox" checked> activo</label></div><button class="go" onclick="T(saveUser)">Guardar usuario</button><small>Clave inicial de todos: cambiar123 — cámbiala.</small></div>
+ <div class="card"><h3>Exportar</h3>${['cuts','sales','clients','resumen'].map(n=>`<a href="/api/export/${n}.csv">${n}.csv</a>`).join(' · ')}</div>`)}
+</script></body></html>
