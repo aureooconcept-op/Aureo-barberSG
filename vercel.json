@@ -1,4 +1,6 @@
 {
+  "framework": null,
+  "outputDirectory": "public",
   "regions": ["gru1"],
   "rewrites": [{ "source": "/api/(.*)", "destination": "/api" }]
 }
