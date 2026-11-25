@@ -22,7 +22,7 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS i_sales ON sales(created_at,barber_id)`
 ];
 // Crea tablas y datos iniciales solo la primera vez (TODO editable desde la app)
-const ready = (async () => {
+const init = async () => {
   if ((await Q("SELECT 1 x FROM sqlite_master WHERE name='users'")).length) return;
   await db.batch(SCHEMA, 'write');
   const u = (n, un, role) => ({ sql: 'INSERT INTO users(name,username,pass,role) VALUES(?,?,?,?)', args: [n, un, hash('cambiar123'), role] });
@@ -34,7 +34,15 @@ const ready = (async () => {
       .map(x => ({ sql: 'INSERT INTO services(name,kind,price) VALUES(?,?,?)', args: x })),
     ...[['Cera', 28000], ['Aceite de barba', 35000], ['Shampoo', 22000]].map(x => ({ sql: 'INSERT INTO products(name,price) VALUES(?,?)', args: x }))
   ], 'write');
-})();
+};
+const migrate = async () => {
+  const has = async (t, c) => (await Q(`PRAGMA table_info(${t})`)).some(x => x.name == c), st = [];
+  if (!(await has('products', 'cost'))) st.push('ALTER TABLE products ADD COLUMN cost REAL DEFAULT 0', "UPDATE products SET cost=CASE name WHEN 'Cera' THEN 16000 WHEN 'Aceite de barba' THEN 20000 WHEN 'Shampoo' THEN 13000 ELSE 0 END");
+  if (!(await has('sales', 'unit_cost'))) st.push('ALTER TABLE sales ADD COLUMN unit_cost REAL DEFAULT 0');
+  st.push('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)');
+  await db.batch(st, 'write');
+};
+const ready = init().then(() => migrate().catch(e => { if (!/duplicate/i.test(e.message)) throw e; }));
 
 const A = f => (q, r) => f(q, r).catch(e => r.status(500).json({ error: e.message }));
 const UC = new Map(); // caché de sesión (60 s) para no consultar la base en cada petición
@@ -69,14 +77,15 @@ app.get('/api/me', auth, (q, r) => r.json(q.u));
 let CAT = null; // caché del catálogo (10 s); se invalida al editar precios/usuarios
 const loadCat = async () => { const [services, products, barbers] = await Promise.all([Q('SELECT * FROM services'), Q('SELECT * FROM products'), Q("SELECT id,name FROM users WHERE role='barbero' AND active=1")]); return { services, products, barbers }; };
 const catalog = async () => (CAT && CAT.t > Date.now()) ? CAT.v : (CAT = { t: Date.now() + 10e3, v: await loadCat() }).v;
-app.get('/api/catalog', auth, A(async (q, r) => r.json(await catalog())));
-app.get('/api/boot', auth, A(async (q, r) => r.json({ u: q.u, ...(await catalog()) }))); // sesión + catálogo en una sola petición
+const view = (q, c) => isA(q) ? c : { services: c.services, products: c.products.map(({ cost, ...x }) => x), barbers: c.barbers.filter(b => b.id == q.u.id) };
+app.get('/api/catalog', auth, A(async (q, r) => r.json(view(q, await catalog()))));
+app.get('/api/boot', auth, A(async (q, r) => r.json({ u: q.u, ...view(q, await catalog()) }))); // sesión + catálogo en una sola petición
 app.put('/api/catalog/:t', auth, adm, A(async (q, r) => {
   const t = q.params.t; if (!['services', 'products'].includes(t)) return r.sendStatus(404);
-  const ins = t == 'services' ? "INSERT INTO services(name,price,active,kind) VALUES(?,?,?,'corte')" : 'INSERT INTO products(name,price,active) VALUES(?,?,?)';
+  const P = t == 'products', ins = P ? 'INSERT INTO products(name,price,active,cost) VALUES(?,?,?,?)' : "INSERT INTO services(name,price,active,kind) VALUES(?,?,?,'corte')";
   await db.batch(q.body.items.filter(i => i.name).map(i => i.id
-    ? { sql: `UPDATE ${t} SET name=?,price=?,active=? WHERE id=?`, args: [i.name, i.price, i.active, i.id] }
-    : { sql: ins, args: [i.name, i.price, i.active] }), 'write');
+    ? { sql: `UPDATE ${t} SET name=?,price=?,active=?${P ? ',cost=?' : ''} WHERE id=?`, args: [i.name, i.price, i.active, ...(P ? [+i.cost || 0] : []), i.id] }
+    : { sql: ins, args: [i.name, i.price, i.active, ...(P ? [+i.cost || 0] : [])] }), 'write');
   CAT = null; r.json({ ok: 1 });
 }));
 
@@ -112,7 +121,7 @@ app.post('/api/cuts', auth, A(async (q, r) => {
   const b = q.body, cat = await catalog(), s = cat.services.find(x => x.id == b.service_id && x.kind == 'corte' && x.active);
   if (!s) return r.status(400).json({ error: 'Servicio inválido' });
   const ex = n => cat.services.find(x => x.kind == 'extra' && x.name == n)?.price || 0;
-  const price = s.price + (b.beard ? ex('Barba') : 0) + (b.mask ? ex('Mascarilla') : 0), bid = +b.barber_id || q.u.id, p = phone(b.phone); // precio calculado en servidor
+  const price = s.price + (b.beard ? ex('Barba') : 0) + (b.mask ? ex('Mascarilla') : 0), bid = isA(q) ? (+b.barber_id || q.u.id) : q.u.id, p = phone(b.phone); // precio calculado en servidor
   const ins = { sql: 'INSERT INTO cuts(barber_id,client_id,service_id,beard,mask,price) VALUES(?,(SELECT id FROM clients WHERE phone=?),?,?,?,?)', args: [bid, p, s.id, b.beard ? 1 : 0, b.mask ? 1 : 0, price] };
   const res = await db.batch(p ? [{ sql: 'SELECT id FROM clients WHERE phone=?', args: [p] },
     { sql: "INSERT INTO clients(name,phone) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET name=COALESCE(NULLIF(excluded.name,''),name)", args: [b.name || '', p] }, ins] : [ins], 'write');
@@ -124,7 +133,7 @@ app.post('/api/cuts', auth, A(async (q, r) => {
 app.post('/api/sales', auth, A(async (q, r) => {
   const b = q.body, cat = await catalog(), p = cat.products.find(x => x.id == b.product_id && x.active), n = Math.max(1, +b.qty || 1);
   if (!p) return r.status(400).json({ error: 'Producto inválido' });
-  const bid = +b.barber_id || q.u.id, i = await db.execute({ sql: 'INSERT INTO sales(barber_id,product_id,qty,unit_price,total) VALUES(?,?,?,?,?)', args: [bid, p.id, n, p.price, p.price * n] }), id = Number(i.lastInsertRowid);
+  const bid = isA(q) ? (+b.barber_id || q.u.id) : q.u.id, i = await db.execute({ sql: 'INSERT INTO sales(barber_id,product_id,qty,unit_price,unit_cost,total) VALUES(?,?,?,?,?,?)', args: [bid, p.id, n, p.price, p.cost || 0, p.price * n] }), id = Number(i.lastInsertRowid);
   mirror('Ventas', [ts(), id, cat.barbers.find(x => x.id == bid)?.name || '', p.name, n, p.price, p.price * n]);
   r.json({ id, total: p.price * n });
 }));
@@ -158,6 +167,30 @@ app.get('/api/stats', auth, A(async (q, r) => {
 
 app.get('/api/clients', auth, adm, A(async (q, r) => r.json(await Q(
   'SELECT c.*,(SELECT MAX(created_at) FROM cuts WHERE client_id=c.id) last,(SELECT COUNT(*) FROM cuts WHERE client_id=c.id) visits FROM clients c'))));
+
+// ---- Semana (lunes a domingo): renta de silla y comisión de productos ----
+const today = () => new Date(Date.now() - 5 * 36e5).toISOString().slice(0, 10);
+const addD = (d, n) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+const mon = d => addD(d, -((new Date(d + 'T00:00:00Z').getUTCDay() + 6) % 7));
+const cfgGet = async () => { const c = Object.fromEntries((await Q('SELECT key,value FROM settings')).map(x => [x.key, +x.value])); return { rent_weekly: c.rent_weekly ?? 200000, commission_pct: c.commission_pct ?? 10 }; };
+app.get('/api/settings', auth, adm, A(async (q, r) => r.json(await cfgGet())));
+app.put('/api/settings', auth, adm, A(async (q, r) => {
+  const v = [['rent_weekly', Math.max(0, +q.body.rent_weekly || 0)], ['commission_pct', Math.min(100, Math.max(0, +q.body.commission_pct || 0))]];
+  await db.batch(v.map(([k, x]) => ({ sql: 'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', args: [k, x] })), 'write'); r.json({ ok: 1 });
+}));
+app.get('/api/week', auth, A(async (q, r) => {
+  const u = isA(q) ? null : q.u.id, st = mon(/^\d{4}-\d\d-\d\d$/.test(q.query.start || '') ? q.query.start : today()), p = { f: st + ' 00:00:00', t: addD(st, 6) + ' 23:59:59', u }, W = 'created_at BETWEEN :f AND :t';
+  const [rows, cfg, items] = await Promise.all([
+    Q(`SELECT u.id,u.name,
+      (SELECT COUNT(*) FROM cuts WHERE barber_id=u.id AND ${W}) cuts,
+      (SELECT COALESCE(SUM(price),0) FROM cuts WHERE barber_id=u.id AND ${W}) cut_rev,
+      (SELECT COALESCE(SUM(qty),0) FROM sales WHERE barber_id=u.id AND ${W}) units,
+      (SELECT COALESCE(SUM((unit_price-unit_cost)*qty),0) FROM sales WHERE barber_id=u.id AND ${W}) profit
+      FROM users u WHERE u.role='barbero' AND u.active=1 AND (:u IS NULL OR u.id=:u)`, p),
+    cfgGet(),
+    u ? Q(`SELECT p.name,SUM(s.qty) qty,SUM((s.unit_price-s.unit_cost)*s.qty) profit FROM sales s JOIN products p ON p.id=s.product_id WHERE s.barber_id=:u AND s.created_at BETWEEN :f AND :t GROUP BY p.id`, p) : []]);
+  r.json({ start: st, rent: cfg.rent_weekly, pct: cfg.commission_pct, items, rows: rows.map(x => ({ ...x, commission: Math.round(x.profit * cfg.commission_pct / 100) })) });
+}));
 
 // ---- Agenda y disponibilidad ----
 app.get('/api/appointments', auth, A(async (q, r) => r.json(await Q(
