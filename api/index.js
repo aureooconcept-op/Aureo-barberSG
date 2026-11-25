@@ -37,11 +37,14 @@ const ready = (async () => {
 })();
 
 const A = f => (q, r) => f(q, r).catch(e => r.status(500).json({ error: e.message }));
+const UC = new Map(); // caché de sesión (60 s) para no consultar la base en cada petición
 const me = async q => {
   const t = (q.headers.cookie || '').split('; ').find(c => c.startsWith('t='))?.slice(2) || '';
   const [id, exp, s] = t.split('.');
   if (!s || s !== sig(id + '.' + exp) || +exp < Date.now()) return;
-  return one('SELECT id,name,role FROM users WHERE id=? AND active=1', [id]);
+  const c = UC.get(id); if (c && c.t > Date.now()) return c.u;
+  const u = await one('SELECT id,name,role FROM users WHERE id=? AND active=1', [id]);
+  if (u) UC.set(id, { u, t: Date.now() + 6e4 }); return u;
 };
 const auth = (q, r, n) => me(q).then(u => (q.u = u) ? n() : r.status(401).json({ error: 'No autorizado' }), e => r.status(500).json({ error: e.message }));
 const adm = (q, r, n) => q.u.role == 'admin' ? n() : r.status(403).json({ error: 'Solo administradores' });
@@ -63,47 +66,37 @@ app.post('/api/login', A(async (q, r) => {
 app.post('/api/logout', (q, r) => { r.setHeader('Set-Cookie', 't=; Path=/; Max-Age=0'); r.json({}); });
 app.get('/api/me', auth, (q, r) => r.json(q.u));
 
-app.get('/api/catalog', auth, A(async (q, r) => {
-  const [services, products, barbers] = await Promise.all([Q('SELECT * FROM services'), Q('SELECT * FROM products'), Q("SELECT id,name FROM users WHERE role='barbero' AND active=1")]);
-  r.json({ services, products, barbers });
-}));
+let CAT = null; // caché del catálogo (10 s); se invalida al editar precios/usuarios
+const loadCat = async () => { const [services, products, barbers] = await Promise.all([Q('SELECT * FROM services'), Q('SELECT * FROM products'), Q("SELECT id,name FROM users WHERE role='barbero' AND active=1")]); return { services, products, barbers }; };
+const catalog = async () => (CAT && CAT.t > Date.now()) ? CAT.v : (CAT = { t: Date.now() + 10e3, v: await loadCat() }).v;
+app.get('/api/catalog', auth, A(async (q, r) => r.json(await catalog())));
+app.get('/api/boot', auth, A(async (q, r) => r.json({ u: q.u, ...(await catalog()) }))); // sesión + catálogo en una sola petición
 app.put('/api/catalog/:t', auth, adm, A(async (q, r) => {
   const t = q.params.t; if (!['services', 'products'].includes(t)) return r.sendStatus(404);
   const ins = t == 'services' ? "INSERT INTO services(name,price,active,kind) VALUES(?,?,?,'corte')" : 'INSERT INTO products(name,price,active) VALUES(?,?,?)';
   await db.batch(q.body.items.filter(i => i.name).map(i => i.id
     ? { sql: `UPDATE ${t} SET name=?,price=?,active=? WHERE id=?`, args: [i.name, i.price, i.active, i.id] }
     : { sql: ins, args: [i.name, i.price, i.active] }), 'write');
-  r.json({ ok: 1 });
+  CAT = null; r.json({ ok: 1 });
 }));
 
-// ---- Espejo en tiempo real a Google Sheets (opcional; si falla, el registro ya quedó en Turso) ----
-const GE = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL, GK = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'), GS = process.env.GOOGLE_SHEET_ID;
+// ---- Espejo en tiempo real a Google Sheets vía Apps Script (gratis, sin Google Cloud) ----
+// Si falla, el registro ya quedó guardado en Turso. Se envía en segundo plano para no hacer esperar al barbero.
+let waitUntil = () => {}; try { waitUntil = require('@vercel/functions').waitUntil; } catch (e) {}
+const GU = process.env.GOOGLE_SCRIPT_URL, GP = process.env.GOOGLE_SCRIPT_SECRET;
 const ts = () => new Date(Date.now() - 5 * 36e5).toISOString().replace('T', ' ').slice(0, 19);
-const ph = p => { p = String(p || '').replace(/\D/g, ''); return p ? "'" + p : ''; };
-const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
-let tok = { v: '', exp: 0 };
-async function gtoken() {
-  if (tok.exp > Date.now()) return tok.v;
-  const n = Math.floor(Date.now() / 1e3), h = b64({ alg: 'RS256', typ: 'JWT' }) + '.' + b64({ iss: GE, scope: 'https://www.googleapis.com/auth/spreadsheets', aud: 'https://oauth2.googleapis.com/token', iat: n, exp: n + 3600 });
-  const jwt = h + '.' + cr.sign('RSA-SHA256', Buffer.from(h), GK).toString('base64url');
-  const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }) }).then(x => x.json());
-  if (!r.access_token) throw new Error(r.error_description || 'No se pudo autenticar con Google');
-  tok = { v: r.access_token, exp: Date.now() + (r.expires_in - 60) * 1e3 }; return tok.v;
-}
-const gfetch = async (path, opt = {}) => {
-  const r = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${GS}${path}`, { ...opt, headers: { Authorization: 'Bearer ' + await gtoken(), 'Content-Type': 'application/json' } });
-  if (!r.ok) throw new Error(await r.text()); return r.json();
-};
-const mirror = async (tab, row) => {
-  if (!GE || !GK || !GS) return;
-  try {
-    await Promise.race([gfetch(`/values/${encodeURIComponent(tab + '!A1')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, { method: 'POST', body: JSON.stringify({ values: [row] }) }),
-      new Promise((_, j) => setTimeout(() => j(new Error('timeout')), 5000))]);
-  } catch (e) { console.error('Sheets:', e.message); }
+const ph = p => String(p || '').replace(/\D/g, '');
+const gcall = (url, opt) => Promise.race([fetch(url, opt).then(x => x.json()), new Promise((_, j) => setTimeout(() => j(new Error('timeout')), 15000))]);
+const mirror = (tab, row) => {
+  if (!GU || !GP) return;
+  const job = gcall(GU, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ secret: GP, tab, row }) })
+    .then(x => { if (!x.ok) throw new Error(x.error); }).catch(e => console.error('Sheets:', e.message));
+  try { waitUntil(job); } catch (e) {}
 };
 app.get('/api/sheets-test', auth, adm, A(async (q, r) => {
-  if (!GE || !GK || !GS) return r.json({ ok: false, error: 'Faltan variables GOOGLE_* en Vercel' });
-  try { r.json({ ok: true, hoja: (await gfetch('?fields=properties.title')).properties.title }); } catch (e) { r.json({ ok: false, error: e.message }); }
+  if (!GU || !GP) return r.json({ ok: false, error: 'Faltan GOOGLE_SCRIPT_URL / GOOGLE_SCRIPT_SECRET en Vercel' });
+  try { const x = await gcall(GU + '?secret=' + encodeURIComponent(GP)); r.json(x.ok ? { ok: true, hoja: x.hoja } : { ok: false, error: x.error || 'Respuesta inesperada' }); }
+  catch (e) { r.json({ ok: false, error: e.message }); }
 }));
 
 // ---- Registro de cortes y ventas ----
@@ -111,27 +104,28 @@ const client = async (n, p) => {
   p = String(p || '').replace(/\D/g, ''); if (!p) return null; if (p.length == 10) p = '57' + p;
   const had = await one('SELECT id FROM clients WHERE phone=?', [p]);
   await db.execute({ sql: "INSERT INTO clients(name,phone) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET name=COALESCE(NULLIF(excluded.name,''),name)", args: [n || '', p] });
-  if (!had) await mirror('Clientes', [ts(), n || '', "'" + p]);
+  if (!had) await mirror('Clientes', [ts(), n || '', p]);
   return had ? had.id : (await one('SELECT id FROM clients WHERE phone=?', [p])).id;
 };
+const phone = p => { p = String(p || '').replace(/\D/g, ''); return p ? (p.length == 10 ? '57' + p : p) : null; };
 app.post('/api/cuts', auth, A(async (q, r) => {
-  const b = q.body, s = await one("SELECT * FROM services WHERE id=? AND kind='corte' AND active=1", [b.service_id]);
+  const b = q.body, cat = await catalog(), s = cat.services.find(x => x.id == b.service_id && x.kind == 'corte' && x.active);
   if (!s) return r.status(400).json({ error: 'Servicio inválido' });
-  const E = Object.fromEntries((await Q("SELECT name,price FROM services WHERE kind='extra'")).map(x => [x.name, x.price]));
-  const price = s.price + (b.beard ? E.Barba || 0 : 0) + (b.mask ? E.Mascarilla || 0 : 0); // precio calculado en servidor
-  const bid = +b.barber_id || q.u.id;
-  const i = await db.execute({ sql: 'INSERT INTO cuts(barber_id,client_id,service_id,beard,mask,price) VALUES(?,?,?,?,?,?)', args: [bid, await client(b.name, b.phone), s.id, b.beard ? 1 : 0, b.mask ? 1 : 0, price] });
-  const id = Number(i.lastInsertRowid);
-  await mirror('Cortes', [ts(), id, (await one('SELECT name FROM users WHERE id=?', [bid])).name, b.name || '', ph(b.phone), s.name, b.beard ? 'Sí' : 'No', b.mask ? 'Sí' : 'No', price]);
+  const ex = n => cat.services.find(x => x.kind == 'extra' && x.name == n)?.price || 0;
+  const price = s.price + (b.beard ? ex('Barba') : 0) + (b.mask ? ex('Mascarilla') : 0), bid = +b.barber_id || q.u.id, p = phone(b.phone); // precio calculado en servidor
+  const ins = { sql: 'INSERT INTO cuts(barber_id,client_id,service_id,beard,mask,price) VALUES(?,(SELECT id FROM clients WHERE phone=?),?,?,?,?)', args: [bid, p, s.id, b.beard ? 1 : 0, b.mask ? 1 : 0, price] };
+  const res = await db.batch(p ? [{ sql: 'SELECT id FROM clients WHERE phone=?', args: [p] },
+    { sql: "INSERT INTO clients(name,phone) VALUES(?,?) ON CONFLICT(phone) DO UPDATE SET name=COALESCE(NULLIF(excluded.name,''),name)", args: [b.name || '', p] }, ins] : [ins], 'write');
+  const id = Number(res[res.length - 1].lastInsertRowid);
+  if (p && !res[0].rows.length) mirror('Clientes', [ts(), b.name || '', p]);
+  mirror('Cortes', [ts(), id, cat.barbers.find(x => x.id == bid)?.name || '', b.name || '', p || '', s.name, b.beard ? 'Sí' : 'No', b.mask ? 'Sí' : 'No', price]);
   r.json({ id, price });
 }));
 app.post('/api/sales', auth, A(async (q, r) => {
-  const b = q.body, p = await one('SELECT * FROM products WHERE id=? AND active=1', [b.product_id]), n = Math.max(1, +b.qty || 1);
+  const b = q.body, cat = await catalog(), p = cat.products.find(x => x.id == b.product_id && x.active), n = Math.max(1, +b.qty || 1);
   if (!p) return r.status(400).json({ error: 'Producto inválido' });
-  const bid = +b.barber_id || q.u.id;
-  const i = await db.execute({ sql: 'INSERT INTO sales(barber_id,product_id,qty,unit_price,total) VALUES(?,?,?,?,?)', args: [bid, p.id, n, p.price, p.price * n] });
-  const id = Number(i.lastInsertRowid);
-  await mirror('Ventas', [ts(), id, (await one('SELECT name FROM users WHERE id=?', [bid])).name, p.name, n, p.price, p.price * n]);
+  const bid = +b.barber_id || q.u.id, i = await db.execute({ sql: 'INSERT INTO sales(barber_id,product_id,qty,unit_price,total) VALUES(?,?,?,?,?)', args: [bid, p.id, n, p.price, p.price * n] }), id = Number(i.lastInsertRowid);
+  mirror('Ventas', [ts(), id, cat.barbers.find(x => x.id == bid)?.name || '', p.name, n, p.price, p.price * n]);
   r.json({ id, total: p.price * n });
 }));
 
@@ -158,7 +152,7 @@ app.get('/api/stats', auth, A(async (q, r) => {
       (SELECT COALESCE(SUM(total),0) FROM sales WHERE barber_id=u.id AND ${W}) sales_rev
       FROM users u WHERE u.role='barbero' AND (:u IS NULL OR u.id=:u)`, p),
     one(`SELECT COUNT(DISTINCT client_id) n FROM cuts WHERE ${W} AND (:u IS NULL OR barber_id=:u)`, p),
-    proj(u)]);
+    q.query.lite ? null : proj(u)]);
   r.json({ per, clients: c.n, proj: pr });
 }));
 
@@ -191,7 +185,7 @@ app.post('/api/users', auth, adm, A(async (q, r) => {
   const e = await one('SELECT id FROM users WHERE username=?', [un]);
   if (e) await db.execute({ sql: 'UPDATE users SET name=?,role=?,active=?' + (b.password ? ',pass=?' : '') + ' WHERE id=?', args: [b.name, b.role, b.active ? 1 : 0, ...(b.password ? [hash(b.password)] : []), e.id] });
   else await db.execute({ sql: 'INSERT INTO users(name,username,pass,role) VALUES(?,?,?,?)', args: [b.name, un, hash(b.password || 'cambiar123'), b.role] });
-  r.json({ ok: 1 });
+  CAT = null; UC.clear(); r.json({ ok: 1 });
 }));
 
 // ---- Exportación CSV (sesión admin, o ?key=EXPORT_KEY para Google Sheets IMPORTDATA) ----
